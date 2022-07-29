@@ -209,7 +209,11 @@ fn get_all_upgrades() -> Result<Vec<Upgrade>> {
         .output()
         .context("failed to execute pacman -Qu")?;
 
-    if !update_output.status.success() {
+    // if no updates are available, pacman exits 1 with no output. Therefore the error case is only
+    // when we the status is nonzero and we get something on stdout or stderr.
+    if !update_output.status.success()
+        && (!update_output.stdout.is_empty() || !update_output.stderr.is_empty())
+    {
         eprintln!("Failed to check updates!");
         eprintln!("Command: {update_cmd:?}");
         eprintln!("Standard Output:");
