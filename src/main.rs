@@ -66,8 +66,7 @@ impl Upgrade {
     }
 }
 
-/// Represents a pacman repo. Either one of the standard ones, a local non-repo package, or
-/// a custom named repo.
+/// Represents a pacman repo. Either one of the standard ones, or a custom named repo.
 ///
 /// The automatically derived (Partial)Ord implementation does what we want - sorts first by the
 /// enum discriminant value (order variants are defined) and lexographically if both are
@@ -78,7 +77,6 @@ enum Repo {
     Extra,
     Community,
     Multilib,
-    Local,
     Custom(String),
 }
 
@@ -90,7 +88,6 @@ impl FromStr for Repo {
             "extra" => Self::Extra,
             "community" => Self::Community,
             "multilib" => Self::Multilib,
-            "local" | "" => Self::Local,
             _ => Self::Custom(s.to_owned()),
         })
     }
@@ -109,7 +106,6 @@ impl Repo {
             Self::Extra => "extra",
             Self::Community => "community",
             Self::Multilib => "multilib",
-            Self::Local => "local",
             Self::Custom(repo) => repo.as_str(),
         }
     }
@@ -120,7 +116,6 @@ impl Repo {
             Self::Extra => Color::Blue,
             Self::Community => Color::Red,
             Self::Multilib => Color::Green,
-            Self::Local => Color::Magenta,
             Self::Custom(_) => Color::Cyan,
         };
         let mut spec = ColorSpec::new();
