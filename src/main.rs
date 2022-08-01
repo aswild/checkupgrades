@@ -226,37 +226,46 @@ fn get_all_upgrades() -> Result<Vec<Upgrade>> {
         .collect())
 }
 
+/// Given a list of `Upgrade`s, query pacman and set the `repo` field appropriately for each
+/// `Upgrade` if possible.
 fn add_repos(upgrades: &mut [Upgrade]) -> Result<()> {
-    lazy_static! {
-        static ref RE: Regex = Regex::new(r"^(\S+) (\S+)").unwrap();
-    }
-
     // The easiest way to figure out which repo a package comes from is with `pacman -Sl`. We end
     // up collecting *all* of the packages doing this, but something more granular would involve
     // parsing a bunch of `pacman -Si` output or diving into libalpm. This simple method should be
     // good enough.
-    let mut map = HashMap::<String, Repo>::new();
-    let output = Command::new("pacman").arg("-Sl").output()?;
-    for line in String::from_utf8(output.stdout)?.lines() {
-        let caps = match RE.captures(line) {
-            Some(caps) => caps,
-            None => continue,
-        };
-        map.insert(
-            caps.get(2).unwrap().as_str().into(),
-            caps.get(1).unwrap().as_str().parse().unwrap(),
-        );
-    }
+    let output = Command::new("pacman")
+        .arg("-Sl")
+        .output()
+        .context("failed to run `pacman -Sl`")?;
+    let stdout = String::from_utf8(output.stdout).context("`pacman -Sl` output was not UTF-8")?;
+
+    // The output we're parsing looks like this, we want the first two words
+    //     % pacman -Sl | head -n3
+    //     core acl 2.3.1-2 [installed]
+    //     core amd-ucode 20220708.be7798e-1
+    //     core archlinux-keyring 20220713-2 [installed]
+    // repomap is a mapping of pkgname -> reponame, all borrowed from `stdout`
+    let repomap: HashMap<&str, &str> = stdout
+        .lines()
+        .filter_map(|line| {
+            let mut s = line.split(' ');
+            match (s.next(), s.next()) {
+                (Some(repo), Some(pkgname)) => Some((pkgname, repo)),
+                _ => None,
+            }
+        })
+        .collect();
 
     for upgrade in upgrades.iter_mut() {
-        upgrade.repo = map.get(&upgrade.pkgname).cloned();
+        upgrade.repo = repomap
+            .get(upgrade.pkgname.as_str())
+            .map(|s| s.parse().unwrap());
     }
 
     Ok(())
 }
 
 fn run() -> Result<()> {
-    //let mut upgrades = get_all_upgrades()?;
     let mut upgrades = if atty::is(atty::Stream::Stdin) {
         // running from a terminal, do normal pacman things to get updates
         get_all_upgrades()?
@@ -268,7 +277,10 @@ fn run() -> Result<()> {
             .context("failed to read stdin")?;
         buf.lines().filter_map(|line| line.parse().ok()).collect()
     };
-    let _ = add_repos(&mut upgrades);
+    if let Err(err) = add_repos(&mut upgrades) {
+        eprintln!("Warning: failed to map packages to repos: {err:#}");
+    }
+
     upgrades.sort_by(|a, b| a.repo.cmp(&b.repo));
 
     let repo_width = upgrades
