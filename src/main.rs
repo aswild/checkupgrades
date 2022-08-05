@@ -281,7 +281,11 @@ fn run() -> Result<()> {
         eprintln!("Warning: failed to map packages to repos: {err:#}");
     }
 
-    upgrades.sort_by(|a, b| a.repo.cmp(&b.repo));
+    // sort by repo, then by pkgname
+    upgrades.sort_unstable_by(|a, b| match a.repo.cmp(&b.repo) {
+        std::cmp::Ordering::Equal => a.pkgname.cmp(&b.pkgname),
+        greater_or_less => greater_or_less,
+    });
 
     let repo_width = upgrades
         .iter()
