@@ -11,7 +11,7 @@ use std::str::FromStr;
 use anyhow::{anyhow, Context, Result};
 use bstr::ByteSlice;
 use clap::Parser;
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 
@@ -26,9 +26,7 @@ struct Upgrade {
 impl FromStr for Upgrade {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        lazy_static! {
-            static ref RE: Regex = Regex::new(r"^(\S+) (\S+) -> (\S+)$").unwrap();
-        }
+        static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(\S+) (\S+) -> (\S+)$").unwrap());
 
         let caps = RE.captures(s).ok_or(())?;
         Ok(Self {

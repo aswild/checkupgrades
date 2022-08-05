@@ -59,8 +59,8 @@ dependencies = [
  "atty",
  "bstr",
  "clap",
- "lazy_static",
  "libc",
+ "once_cell",
  "regex",
  "termcolor",
 ]
