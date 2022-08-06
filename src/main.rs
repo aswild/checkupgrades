@@ -275,6 +275,7 @@ fn run() -> Result<()> {
             .context("failed to read stdin")?;
         buf.lines().filter_map(|line| line.parse().ok()).collect()
     };
+
     if let Err(err) = add_repos(&mut upgrades) {
         eprintln!("Warning: failed to map packages to repos: {err:#}");
     }
@@ -285,48 +286,70 @@ fn run() -> Result<()> {
         greater_or_less => greater_or_less,
     });
 
-    let repo_width = upgrades
+    // the max length of "repo/pkgname" for all upgrades
+    let repo_name_width = upgrades
         .iter()
-        .filter_map(|u| u.repo.as_ref().map(|r| r.as_str().len()))
+        .map(|u| {
+            let repo_width = match &u.repo {
+                // add 1 for the '/' after the repo name
+                Some(repo) => repo.as_str().len() + 1,
+                None => 0,
+            };
+            repo_width + u.pkgname.len()
+        })
         .max()
         .unwrap_or(0);
-    let name_width = upgrades.iter().map(|u| u.pkgname.len()).max().unwrap_or(0);
-    let repo_name_width = repo_width + name_width + 1;
+
     let oldver_width = upgrades.iter().map(|u| u.oldver.len()).max().unwrap_or(0);
 
-    let mut out = StandardStream::stdout(ColorChoice::Always);
+    let out = StandardStream::stdout(ColorChoice::Always);
+    let mut out = out.lock();
     let red = ColorSpec::new().set_fg(Some(Color::Red)).clone();
     let green = ColorSpec::new().set_fg(Some(Color::Green)).clone();
 
     for u in upgrades.iter() {
-        match u.repo {
-            Some(ref repo) => {
+        // [repo/]pkgname
+        match &u.repo {
+            Some(repo) => {
                 out.set_color(&repo.color_spec())?;
                 write!(out, "{repo}")?;
                 out.reset()?;
                 write!(
                     out,
-                    "/{}{:width$}",
-                    u.pkgname,
-                    "",
-                    width = repo_name_width - u.pkgname.len() - repo.as_str().len() - 1
+                    "/{pkgname}{space:width$}",
+                    pkgname = u.pkgname,
+                    space = "",
+                    width = repo_name_width - (u.pkgname.len() + repo.as_str().len() + 1),
                 )?;
             }
-            None => write!(out, "{:repo_name_width$} ", u.pkgname)?,
+            None => write!(out, "{:repo_name_width$}", u.pkgname)?,
         }
 
+        // two spaces between pkgname and old version
+        write!(out, "  ")?;
+
+        // old version
         let clen = u.common_length();
         write!(out, "{}", &u.oldver[..clen])?;
         out.set_color(&red)?;
         write!(out, "{}", &u.oldver[clen..])?;
         out.reset()?;
-        if u.oldver.len() < oldver_width {
-            write!(out, "{:1$}", " ", oldver_width - u.oldver.len())?;
-        }
-        write!(out, " -> {}", &u.newver[..clen])?;
+
+        // padding and arrow between old and new version
+        write!(
+            out,
+            "{space:width$} -> ",
+            space = "",
+            width = oldver_width - u.oldver.len()
+        )?;
+
+        // new version
+        write!(out, "{}", &u.newver[..clen])?;
         out.set_color(&green)?;
         write!(out, "{}", &u.newver[clen..])?;
         out.reset()?;
+
+        // finally, end the line
         writeln!(out)?;
     }
 
