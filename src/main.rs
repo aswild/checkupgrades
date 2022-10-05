@@ -21,6 +21,9 @@ struct Upgrade {
     pkgname: String,
     oldver: String,
     newver: String,
+    // sizes are in bytes (despite being floats)
+    download_size: f32,
+    install_size: f32,
 }
 
 impl FromStr for Upgrade {
@@ -34,6 +37,8 @@ impl FromStr for Upgrade {
             pkgname: caps.get(1).unwrap().as_str().into(),
             oldver: caps.get(2).unwrap().as_str().into(),
             newver: caps.get(3).unwrap().as_str().into(),
+            download_size: 0.,
+            install_size: 0.,
         })
     }
 }
@@ -76,24 +81,49 @@ enum Repo {
     Community,
     Multilib,
     Custom(String),
+    Unknown,
 }
 
-impl FromStr for Repo {
-    type Err = std::convert::Infallible;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s {
-            "core" => Self::Core,
-            "extra" => Self::Extra,
-            "community" => Self::Community,
-            "multilib" => Self::Multilib,
-            _ => Self::Custom(s.to_owned()),
-        })
+impl Repo {
+    fn from_str_common(s: &str) -> Option<Self> {
+        match s {
+            "core" => Some(Self::Core),
+            "extra" => Some(Self::Extra),
+            "community" => Some(Self::Community),
+            "multilib" => Some(Self::Multilib),
+            "" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+
+impl From<String> for Repo {
+    fn from(s: String) -> Self {
+        match Self::from_str_common(&s) {
+            Some(repo) => repo,
+            None => Self::Custom(s),
+        }
+    }
+}
+
+impl From<&str> for Repo {
+    fn from(s: &str) -> Self {
+        match Self::from_str_common(s) {
+            Some(repo) => repo,
+            None => Self::Custom(s.to_owned()),
+        }
     }
 }
 
 impl fmt::Display for Repo {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.pad(self.as_str())
+    }
+}
+
+impl Default for Repo {
+    fn default() -> Self {
+        Self::Unknown
     }
 }
 
@@ -105,6 +135,7 @@ impl Repo {
             Self::Community => "community",
             Self::Multilib => "multilib",
             Self::Custom(repo) => repo.as_str(),
+            Self::Unknown => "[unknown]",
         }
     }
 
@@ -115,11 +146,26 @@ impl Repo {
             Self::Community => Color::Red,
             Self::Multilib => Color::Green,
             Self::Custom(_) => Color::Cyan,
+            Self::Unknown => Color::White,
         };
         let mut spec = ColorSpec::new();
         spec.set_fg(Some(color));
         spec
     }
+}
+
+fn checkupdates_db_path() -> PathBuf {
+    env::var_os("CHECKUPDATES_DB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            // safety: getuid can never fail, it's only unsafe because FFI
+            let uid = unsafe { libc::getuid() };
+            let mut path = env::var_os("TMPDIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/tmp"));
+            path.push(format!("checkup-db-{uid}"));
+            path
+        })
 }
 
 /// This is nominally a reimplementation of /usr/bin/checkupdates, but with nicer error handling
@@ -137,17 +183,7 @@ fn get_all_upgrades() -> Result<Vec<Upgrade>> {
     };
 
     // get the checkup db path
-    let checkupdates_db = env::var_os("CHECKUPDATES_DB")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            // safety: getuid can never fail, it's only unsafe because FFI
-            let uid = unsafe { libc::getuid() };
-            let mut path = env::var_os("TMPDIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/tmp"));
-            path.push(format!("checkup-db-{uid}"));
-            path
-        });
+    let checkupdates_db = checkupdates_db_path();
 
     // create and set up the checkup db directory
     if !checkupdates_db.is_dir() {
@@ -224,40 +260,85 @@ fn get_all_upgrades() -> Result<Vec<Upgrade>> {
         .collect())
 }
 
-/// Given a list of `Upgrade`s, query pacman and set the `repo` field appropriately for each
-/// `Upgrade` if possible.
-fn add_repos(upgrades: &mut [Upgrade]) -> Result<()> {
-    // The easiest way to figure out which repo a package comes from is with `pacman -Sl`. We end
-    // up collecting *all* of the packages doing this, but something more granular would involve
-    // parsing a bunch of `pacman -Si` output or diving into libalpm. This simple method should be
-    // good enough.
-    let output = Command::new("pacman")
-        .arg("-Sl")
-        .output()
-        .context("failed to run `pacman -Sl`")?;
-    let stdout = String::from_utf8(output.stdout).context("`pacman -Sl` output was not UTF-8")?;
+/// Parse `pacman -Si` to get the repository, download size, and installed size for each package
+fn add_extra_info(upgrades: &mut [Upgrade]) -> Result<()> {
+    /// Additional information we get from `pacman -Si` that we can't get from `pacman -Qu`
+    #[derive(Clone, Default)]
+    struct PkgInfo {
+        repo: Repo,
+        download_size: f32,
+        install_size: f32,
+    }
 
-    // The output we're parsing looks like this, we want the first two words
-    //     % pacman -Sl | head -n3
-    //     core acl 2.3.1-2 [installed]
-    //     core amd-ucode 20220708.be7798e-1
-    //     core archlinux-keyring 20220713-2 [installed]
-    // repomap is a mapping of pkgname -> reponame, all borrowed from `stdout`
-    let repomap: HashMap<&str, &str> = stdout
-        .lines()
-        .filter_map(|line| {
-            let mut s = line.split(' ');
-            match (s.next(), s.next()) {
-                (Some(repo), Some(pkgname)) => Some((pkgname, repo)),
-                _ => None,
+    /// Parse a string like "35.33 KiB" into an f32 number of bytes.
+    ///
+    /// Supported suffixes are B, KiB, MiB, and GiB.  There must be exactly one space between the
+    /// number and the suffix. Returns None if the format doesn't match.
+    fn parse_size(s: &str) -> Option<f32> {
+        let (num, unit) = s.split_once(' ')?;
+        let num = num.parse::<f32>().ok()?;
+        let multiplier = match unit {
+            "B" => 1.0,
+            "KiB" => 1024.0,
+            "MiB" => 1_048_576.0,
+            "GiB" => 1_073_741_824.0,
+            _ => return None,
+        };
+        Some(num * multiplier)
+    }
+
+    let output = Command::new("pacman")
+        .arg("-Si")
+        .arg("--dbpath")
+        .arg(checkupdates_db_path())
+        .output()
+        .context("failed to run `pacman -Si`")?;
+    let stdout = String::from_utf8(output.stdout).context("`pacman -Si` output was not UTF-8")?;
+
+    let mut map = HashMap::new();
+    let mut pkg = PkgInfo::default();
+    let mut name = None::<&str>;
+
+    for line in stdout.lines() {
+        if line.is_empty() {
+            match name.take() {
+                Some(pkgname) => {
+                    map.insert(pkgname, std::mem::take(&mut pkg));
+                }
+                None => {
+                    eprintln!("warning: encountered blank `pacman -Si` line with no pkgname found");
+                    pkg = PkgInfo::default();
+                }
             }
-        })
-        .collect();
+            continue;
+        }
+
+        // skip lines that start with whitespace
+        if line.chars().next().unwrap().is_whitespace() {
+            continue;
+        }
+
+        // split on the first ':' and strip whitespace from key and value
+        let (key, val) = match line.split_once(':') {
+            Some((a, b)) => (a.trim(), b.trim()),
+            None => continue,
+        };
+
+        match key {
+            "Repository" => pkg.repo = val.into(),
+            "Name" => name = Some(val),
+            "Download Size" => pkg.download_size = parse_size(val).unwrap_or_default(),
+            "Installed Size" => pkg.install_size = parse_size(val).unwrap_or_default(),
+            _ => (),
+        }
+    }
 
     for upgrade in upgrades.iter_mut() {
-        upgrade.repo = repomap
-            .get(upgrade.pkgname.as_str())
-            .map(|s| s.parse().unwrap());
+        if let Some(info) = map.get(upgrade.pkgname.as_str()) {
+            upgrade.repo = Some(info.repo.clone());
+            upgrade.download_size = info.download_size;
+            upgrade.install_size = info.install_size;
+        }
     }
 
     Ok(())
@@ -276,7 +357,7 @@ fn run() -> Result<()> {
         buf.lines().filter_map(|line| line.parse().ok()).collect()
     };
 
-    if let Err(err) = add_repos(&mut upgrades) {
+    if let Err(err) = add_extra_info(&mut upgrades) {
         eprintln!("Warning: failed to map packages to repos: {err:#}");
     }
 
@@ -352,6 +433,17 @@ fn run() -> Result<()> {
         // finally, end the line
         writeln!(out)?;
     }
+
+    let (total_dl, total_inst) = {
+        let (dl, inst) = upgrades.iter().fold((0f32, 0f32), |(dl, inst), u| {
+            (dl + u.download_size, inst + u.install_size)
+        });
+        (dl / 1048576.0, inst / 1048576.0)
+    };
+
+    writeln!(out)?;
+    writeln!(out, "Total download size:  {total_dl:8.2} MiB")?;
+    writeln!(out, "Total installed size: {total_inst:8.2} MiB")?;
 
     Ok(())
 }
