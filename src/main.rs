@@ -10,7 +10,6 @@ use std::str::FromStr;
 
 use anyhow::{anyhow, Context, Result};
 use bstr::ByteSlice;
-use clap::Parser;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
@@ -448,31 +447,34 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-/// Check for available pacman package updates.
-///
-/// checkupgrades lists available pacman package updates without needing to be
-/// and without actually touching the main pacman sync databases. The output is
-/// colorized formatted to look nice based on paru's layout.
-///
-/// Usage:
-///     checkupgrades [-h|--help]
-///     /usr/bin/checkupdates | checkupgrades
-///
-/// By default, checkupgrades implements the same logic as checkupdates (from the
-/// pacman-contrib package) to fetch a copy of the sync databases and list available
-/// updates for installed packages.
-///
-/// Alternatively, if stdin is piped, it's assumed to be the output of the
-/// checkupdates script from pacman-contrib, and checkupgrades will not invoke any
-/// extra pacman logic besides associating package names with sync db names.
-#[derive(Debug, Parser)]
-#[clap(version, verbatim_doc_comment)]
-struct Args {
-    // no args yet, for now just use clap for help/version
-}
+static HELP_TEXT: &str = "\
+Check for available pacman package updates.
+
+checkupgrades lists available pacman package updates without needing to be
+and without actually touching the main pacman sync databases. The output is
+colorized formatted to look nice based on paru's layout.
+
+Usage:
+    checkupgrades [-h|--help]
+    /usr/bin/checkupdates | checkupgrades
+
+By default, checkupgrades implements the same logic as checkupdates (from the
+pacman-contrib package) to fetch a copy of the sync databases and list available
+updates for installed packages.
+
+Alternatively, if stdin is piped, it's assumed to be the output of the
+checkupdates script from pacman-contrib, and checkupgrades will not invoke any
+extra pacman logic besides associating package names with sync db names.
+";
 
 fn main() {
-    let _args = Args::parse();
+    // we don't actually do any argument parsing (yet), instead clap is just used to implement help
+    // and version flags and error out if any arguments are passed
+    let _ = clap::Command::new(clap::crate_name!())
+        .version(clap::crate_version!())
+        .about(HELP_TEXT.lines().next().unwrap())
+        .long_about(HELP_TEXT)
+        .get_matches();
 
     if let Err(err) = run() {
         if let Some(ioerr) = err.downcast_ref::<io::Error>() {
