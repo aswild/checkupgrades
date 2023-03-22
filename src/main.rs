@@ -10,6 +10,7 @@ use std::str::FromStr;
 
 use anyhow::{anyhow, Context, Result};
 use bstr::ByteSlice;
+use is_terminal::IsTerminal;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
@@ -344,7 +345,7 @@ fn add_extra_info(upgrades: &mut [Upgrade]) -> Result<()> {
 }
 
 fn run() -> Result<()> {
-    let mut upgrades = if atty::is(atty::Stream::Stdin) {
+    let mut upgrades = if io::stdin().is_terminal() {
         // running from a terminal, do normal pacman things to get updates
         get_all_upgrades()?
     } else {
@@ -470,8 +471,7 @@ extra pacman logic besides associating package names with sync db names.
 fn main() {
     // we don't actually do any argument parsing (yet), instead clap is just used to implement help
     // and version flags and error out if any arguments are passed
-    let _ = clap::Command::new(clap::crate_name!())
-        .version(clap::crate_version!())
+    let _ = clap::command!()
         .about(HELP_TEXT.lines().next().unwrap())
         .long_about(HELP_TEXT)
         .get_matches();
