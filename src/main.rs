@@ -7,11 +7,11 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 use anyhow::{anyhow, Context, Result};
 use bstr::ByteSlice;
 use is_terminal::IsTerminal;
-use once_cell::sync::Lazy;
 use regex::Regex;
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 
@@ -29,9 +29,12 @@ struct Upgrade {
 impl FromStr for Upgrade {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(\S+) (\S+) -> (\S+)$").unwrap());
+        let re = {
+            static CELL: OnceLock<Regex> = OnceLock::new();
+            CELL.get_or_init(|| Regex::new(r"^(\S+) (\S+) -> (\S+)$").unwrap())
+        };
 
-        let caps = RE.captures(s).ok_or(())?;
+        let caps = re.captures(s).ok_or(())?;
         Ok(Self {
             repo: None,
             pkgname: caps.get(1).unwrap().as_str().into(),
