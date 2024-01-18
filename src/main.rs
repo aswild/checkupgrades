@@ -56,18 +56,10 @@ impl Upgrade {
         assert!(new.is_ascii());
 
         // get the length of the common prefix
-        let common = old
-            .bytes()
-            .zip(new.bytes())
-            .take_while(|(ob, nb)| ob == nb)
-            .count();
+        let common = old.bytes().zip(new.bytes()).take_while(|(ob, nb)| ob == nb).count();
 
         // walk backwards to the first non-alphanumeric character
-        let extra = old[..common]
-            .bytes()
-            .rev()
-            .take_while(|c| c.is_ascii_alphanumeric())
-            .count();
+        let extra = old[..common].bytes().rev().take_while(|c| c.is_ascii_alphanumeric()).count();
         assert!(extra <= common);
         common - extra
     }
@@ -159,17 +151,14 @@ impl Repo {
 }
 
 fn checkupdates_db_path() -> PathBuf {
-    env::var_os("CHECKUPDATES_DB")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            // safety: getuid can never fail, it's only unsafe because FFI
-            let uid = unsafe { libc::getuid() };
-            let mut path = env::var_os("TMPDIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/tmp"));
-            path.push(format!("checkup-db-{uid}"));
-            path
-        })
+    env::var_os("CHECKUPDATES_DB").map(PathBuf::from).unwrap_or_else(|| {
+        // safety: getuid can never fail, it's only unsafe because FFI
+        let uid = unsafe { libc::getuid() };
+        let mut path =
+            env::var_os("TMPDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
+        path.push(format!("checkup-db-{uid}"));
+        path
+    })
 }
 
 /// This is nominally a reimplementation of /usr/bin/checkupdates, but with nicer error handling
@@ -192,10 +181,7 @@ fn get_all_upgrades() -> Result<Vec<Upgrade>> {
     // create and set up the checkup db directory
     if !checkupdates_db.is_dir() {
         std::fs::create_dir_all(&checkupdates_db).with_context(|| {
-            format!(
-                "Failed to create checkupdates DB directory '{}'",
-                checkupdates_db.display()
-            )
+            format!("Failed to create checkupdates DB directory '{}'", checkupdates_db.display())
         })?;
     }
 
@@ -218,9 +204,7 @@ fn get_all_upgrades() -> Result<Vec<Upgrade>> {
         .args(["--", "pacman", "-Sy", "--dbpath"])
         .arg(&checkupdates_db)
         .args(["--logfile", "/dev/null"]);
-    let sync_output = sync_cmd
-        .output()
-        .context("failed to execute (fakeroot) pacman -Sy")?;
+    let sync_output = sync_cmd.output().context("failed to execute (fakeroot) pacman -Sy")?;
 
     if !sync_output.status.success() {
         eprintln!("Failed to fetch updates!");
@@ -234,13 +218,8 @@ fn get_all_upgrades() -> Result<Vec<Upgrade>> {
 
     // Call pacman to list available updates. This doesn't need fakeroot
     let mut update_cmd = Command::new("pacman");
-    update_cmd
-        .args(["-Qu", "--dbpath"])
-        .arg(&checkupdates_db)
-        .args(["--logfile", "/dev/null"]);
-    let update_output = update_cmd
-        .output()
-        .context("failed to execute pacman -Qu")?;
+    update_cmd.args(["-Qu", "--dbpath"]).arg(&checkupdates_db).args(["--logfile", "/dev/null"]);
+    let update_output = update_cmd.output().context("failed to execute pacman -Qu")?;
 
     // if no updates are available, pacman exits 1 with no output. Therefore the error case is only
     // when we the status is nonzero and we get something on stdout or stderr.
@@ -355,9 +334,7 @@ fn run() -> Result<()> {
     } else {
         // stdin is redirected, assume that we're piping in the output of /usr/bin/checkupdates
         let mut buf = String::new();
-        io::stdin()
-            .read_to_string(&mut buf)
-            .context("failed to read stdin")?;
+        io::stdin().read_to_string(&mut buf).context("failed to read stdin")?;
         buf.lines().filter_map(|line| line.parse().ok()).collect()
     };
 
@@ -421,12 +398,7 @@ fn run() -> Result<()> {
         out.reset()?;
 
         // padding and arrow between old and new version
-        write!(
-            out,
-            "{space:width$} -> ",
-            space = "",
-            width = oldver_width - u.oldver.len()
-        )?;
+        write!(out, "{space:width$} -> ", space = "", width = oldver_width - u.oldver.len())?;
 
         // new version
         write!(out, "{}", &u.newver[..clen])?;
@@ -439,9 +411,9 @@ fn run() -> Result<()> {
     }
 
     let (total_dl, total_inst) = {
-        let (dl, inst) = upgrades.iter().fold((0f32, 0f32), |(dl, inst), u| {
-            (dl + u.download_size, inst + u.install_size)
-        });
+        let (dl, inst) = upgrades
+            .iter()
+            .fold((0f32, 0f32), |(dl, inst), u| (dl + u.download_size, inst + u.install_size));
         (dl / 1048576.0, inst / 1048576.0)
     };
 
