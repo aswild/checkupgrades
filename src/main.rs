@@ -1,18 +1,20 @@
-use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 use anyhow::{anyhow, Context, Result};
 use bstr::ByteSlice;
-use is_terminal::IsTerminal;
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 
+mod alpm;
+
+#[macro_export]
 macro_rules! regex {
     ($re:literal $(,)?) => {{
         static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -26,9 +28,9 @@ struct Upgrade {
     pkgname: String,
     oldver: String,
     newver: String,
-    // sizes are in bytes (despite being floats)
-    download_size: f32,
-    install_size: f32,
+    download_size: u64,
+    install_size: u64,
+    old_size: u64,
 }
 
 impl FromStr for Upgrade {
@@ -41,8 +43,9 @@ impl FromStr for Upgrade {
             pkgname: caps.get(1).unwrap().as_str().into(),
             oldver: caps.get(2).unwrap().as_str().into(),
             newver: caps.get(3).unwrap().as_str().into(),
-            download_size: 0.,
-            install_size: 0.,
+            download_size: 0,
+            install_size: 0,
+            old_size: 0,
         })
     }
 }
@@ -150,14 +153,16 @@ impl Repo {
     }
 }
 
-fn checkupdates_db_path() -> PathBuf {
-    env::var_os("CHECKUPDATES_DB").map(PathBuf::from).unwrap_or_else(|| {
-        // safety: getuid can never fail, it's only unsafe because FFI
-        let uid = unsafe { libc::getuid() };
-        let mut path =
-            env::var_os("TMPDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
-        path.push(format!("checkup-db-{uid}"));
-        path
+fn checkupdates_db_path() -> &'static Path {
+    static CELL: OnceLock<PathBuf> = OnceLock::new();
+    CELL.get_or_init(|| {
+        env::var_os("CHECKUPDATES_DB").map(PathBuf::from).unwrap_or_else(|| {
+            let uid = rustix::process::getuid().as_raw();
+            let mut path =
+                env::var_os("TMPDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
+            path.push(format!("checkup-db-{uid}"));
+            path
+        })
     })
 }
 
@@ -180,7 +185,7 @@ fn get_all_upgrades() -> Result<Vec<Upgrade>> {
 
     // create and set up the checkup db directory
     if !checkupdates_db.is_dir() {
-        std::fs::create_dir_all(&checkupdates_db).with_context(|| {
+        std::fs::create_dir_all(checkupdates_db).with_context(|| {
             format!("Failed to create checkupdates DB directory '{}'", checkupdates_db.display())
         })?;
     }
@@ -202,7 +207,7 @@ fn get_all_upgrades() -> Result<Vec<Upgrade>> {
     let mut sync_cmd = Command::new("fakeroot");
     sync_cmd
         .args(["--", "pacman", "-Sy", "--dbpath"])
-        .arg(&checkupdates_db)
+        .arg(checkupdates_db)
         .args(["--logfile", "/dev/null"]);
     let sync_output = sync_cmd.output().context("failed to execute (fakeroot) pacman -Sy")?;
 
@@ -218,7 +223,7 @@ fn get_all_upgrades() -> Result<Vec<Upgrade>> {
 
     // Call pacman to list available updates. This doesn't need fakeroot
     let mut update_cmd = Command::new("pacman");
-    update_cmd.args(["-Qu", "--dbpath"]).arg(&checkupdates_db).args(["--logfile", "/dev/null"]);
+    update_cmd.args(["-Qu", "--dbpath"]).arg(checkupdates_db).args(["--logfile", "/dev/null"]);
     let update_output = update_cmd.output().context("failed to execute pacman -Qu")?;
 
     // if no updates are available, pacman exits 1 with no output. Therefore the error case is only
@@ -243,87 +248,24 @@ fn get_all_upgrades() -> Result<Vec<Upgrade>> {
         .collect())
 }
 
-/// Parse `pacman -Si` to get the repository, download size, and installed size for each package
+/// Load sync databases to determine download size and installed size for each package
 fn add_extra_info(upgrades: &mut [Upgrade]) -> Result<()> {
-    /// Additional information we get from `pacman -Si` that we can't get from `pacman -Qu`
-    #[derive(Clone, Default)]
-    struct PkgInfo {
-        repo: Repo,
-        download_size: f32,
-        install_size: f32,
-    }
-
-    /// Parse a string like "35.33 KiB" into an f32 number of bytes.
-    ///
-    /// Supported suffixes are B, KiB, MiB, and GiB.  There must be exactly one space between the
-    /// number and the suffix. Returns None if the format doesn't match.
-    fn parse_size(s: &str) -> Option<f32> {
-        let (num, unit) = s.split_once(' ')?;
-        let num = num.parse::<f32>().ok()?;
-        let multiplier = match unit {
-            "B" => 1.0,
-            "KiB" => 1024.0,
-            "MiB" => 1_048_576.0,
-            "GiB" => 1_073_741_824.0,
-            _ => return None,
-        };
-        Some(num * multiplier)
-    }
-
-    let output = Command::new("pacman")
-        .arg("-Si")
-        .arg("--dbpath")
-        .arg(checkupdates_db_path())
-        .output()
-        .context("failed to run `pacman -Si`")?;
-    let stdout = String::from_utf8(output.stdout).context("`pacman -Si` output was not UTF-8")?;
-
-    let mut map = HashMap::new();
-    let mut pkg = PkgInfo::default();
-    let mut name = None::<&str>;
-
-    for line in stdout.lines() {
-        if line.is_empty() {
-            match name.take() {
-                Some(pkgname) => {
-                    map.insert(pkgname, std::mem::take(&mut pkg));
-                }
-                None => {
-                    eprintln!("warning: encountered blank `pacman -Si` line with no pkgname found");
-                    pkg = PkgInfo::default();
+    let syncdb = alpm::SyncPkg::load_sync_dbs(checkupdates_db_path())?;
+    for upgrade in upgrades.iter_mut() {
+        if let Some(pkg) = syncdb.get(&upgrade.pkgname) {
+            upgrade.download_size = pkg.download_size;
+            upgrade.install_size = pkg.install_size;
+            upgrade.repo = Some(pkg.repo.clone());
+            match alpm::local_package_size(checkupdates_db_path(), &upgrade.pkgname) {
+                Ok(size) => upgrade.old_size = size,
+                Err(err) => {
+                    eprintln!("Warning: couldn't get local size for {}: {err}", upgrade.pkgname)
                 }
             }
-            continue;
-        }
-
-        // skip lines that start with whitespace
-        if line.chars().next().unwrap().is_whitespace() {
-            continue;
-        }
-
-        // split on the first ':' and strip whitespace from key and value
-        let (key, val) = match line.split_once(':') {
-            Some((a, b)) => (a.trim(), b.trim()),
-            None => continue,
-        };
-
-        match key {
-            "Repository" => pkg.repo = val.into(),
-            "Name" => name = Some(val),
-            "Download Size" => pkg.download_size = parse_size(val).unwrap_or_default(),
-            "Installed Size" => pkg.install_size = parse_size(val).unwrap_or_default(),
-            _ => (),
+        } else {
+            eprintln!("Warning: package {} not foundin sync DBs", upgrade.pkgname);
         }
     }
-
-    for upgrade in upgrades.iter_mut() {
-        if let Some(info) = map.get(upgrade.pkgname.as_str()) {
-            upgrade.repo = Some(info.repo.clone());
-            upgrade.download_size = info.download_size;
-            upgrade.install_size = info.install_size;
-        }
-    }
-
     Ok(())
 }
 
@@ -410,17 +352,19 @@ fn run() -> Result<()> {
         writeln!(out)?;
     }
 
-    let (total_dl, total_inst) = {
-        let (dl, inst) = upgrades
-            .iter()
-            .fold((0f32, 0f32), |(dl, inst), u| (dl + u.download_size, inst + u.install_size));
-        (dl / 1048576.0, inst / 1048576.0)
+    let (total_dl, total_inst, net_upsize) = {
+        let (dl, inst, old) = upgrades.iter().fold((0, 0, 0), |(dl, inst, old), u| {
+            (dl + u.download_size, inst + u.install_size, old + u.old_size)
+        });
+        let net = (inst as i64) - (old as i64);
+        (dl as f32 / 1048576.0, inst as f32 / 1048576.0, net as f32 / 1048576.0)
     };
 
     writeln!(out)?;
-    writeln!(out, "Packages to upgrade: {}", upgrades.len())?;
+    writeln!(out, "Packages to upgrade:  {}", upgrades.len())?;
     writeln!(out, "Total download size:  {total_dl:8.2} MiB")?;
     writeln!(out, "Total installed size: {total_inst:8.2} MiB")?;
+    writeln!(out, "Net upgrade size:     {net_upsize:8.2} MiB")?;
 
     Ok(())
 }
@@ -448,10 +392,29 @@ extra pacman logic besides associating package names with sync db names.
 fn main() {
     // we don't actually do any argument parsing (yet), instead clap is just used to implement help
     // and version flags and error out if any arguments are passed
-    let _ = clap::command!()
+    let args = clap::command!()
         .about(HELP_TEXT.lines().next().unwrap())
         .long_about(HELP_TEXT)
+        .arg(clap::Arg::new("desc").long("desc"))
+        .arg(clap::Arg::new("db").long("db"))
         .get_matches();
+
+    if let Some(path) = args.get_one::<String>("desc") {
+        let map = alpm::read_desc_file(path).unwrap();
+        dbg!(&map);
+
+        let desc = std::fs::read_to_string(path).unwrap();
+        let pkg = alpm::LocalPkg::from_desc(&desc).unwrap();
+        dbg!(&pkg);
+
+        return;
+    }
+
+    if let Some(path) = args.get_one::<String>("db") {
+        let map = alpm::SyncPkg::load_sync_dbs(path).unwrap();
+        println!("{map:#?}");
+        return;
+    }
 
     if let Err(err) = run() {
         if let Some(ioerr) = err.downcast_ref::<io::Error>() {
@@ -460,6 +423,6 @@ fn main() {
             }
         }
         eprintln!("Error: {err:?}");
-        std::process::exit(libc::EXIT_FAILURE);
+        std::process::exit(1);
     }
 }
