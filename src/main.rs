@@ -367,7 +367,7 @@ fn run() -> Result<()> {
     };
 
     writeln!(out)?;
-    writeln!(out, "Packages to upgrade: {}", upgrades.len())?;
+    writeln!(out, "Packages to upgrade:  {:5}", upgrades.len())?;
     writeln!(out, "Total download size:  {total_dl:8.2} MiB")?;
     writeln!(out, "Total installed size: {total_inst:8.2} MiB")?;
     writeln!(out, "Net upgrade size:     {net_upsize:8.2} MiB")?;
