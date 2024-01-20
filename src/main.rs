@@ -8,6 +8,7 @@ use std::process::Command;
 use std::str::FromStr;
 use std::sync::OnceLock;
 
+use ahash::HashSet;
 use anyhow::{anyhow, Context, Result};
 use bstr::ByteSlice;
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
@@ -250,17 +251,22 @@ fn get_all_upgrades() -> Result<Vec<Upgrade>> {
 
 /// Load sync databases to determine download size and installed size for each package
 fn add_extra_info(upgrades: &mut [Upgrade]) -> Result<()> {
-    let syncdb = alpm::SyncPkg::load_sync_dbs(checkupdates_db_path())?;
+    let upgrade_pkgs: HashSet<&str> = upgrades.iter().map(|u| &*u.pkgname).collect();
+    let syncdb = alpm::SyncPkg::load_sync_dbs(checkupdates_db_path(), |pkgname| {
+        upgrade_pkgs.contains(pkgname)
+    })?;
+    let local_sizes = alpm::local_package_sizes(checkupdates_db_path(), |pkgname| {
+        upgrade_pkgs.contains(pkgname)
+    })?;
+
     for upgrade in upgrades.iter_mut() {
         if let Some(pkg) = syncdb.get(&upgrade.pkgname) {
             upgrade.download_size = pkg.download_size;
             upgrade.install_size = pkg.install_size;
             upgrade.repo = Some(pkg.repo.clone());
-            match alpm::local_package_size(checkupdates_db_path(), &upgrade.pkgname) {
-                Ok(size) => upgrade.old_size = size,
-                Err(err) => {
-                    eprintln!("Warning: couldn't get local size for {}: {err}", upgrade.pkgname)
-                }
+            match local_sizes.get(&upgrade.pkgname) {
+                Some(size) => upgrade.old_size = *size,
+                None => eprintln!("Warning: couldn't get local size for {}", upgrade.pkgname),
             }
         } else {
             eprintln!("Warning: package {} not foundin sync DBs", upgrade.pkgname);
@@ -270,7 +276,7 @@ fn add_extra_info(upgrades: &mut [Upgrade]) -> Result<()> {
 }
 
 fn run() -> Result<()> {
-    let mut upgrades = if io::stdin().is_terminal() {
+    let mut upgrades = if io::stdin().is_terminal() || std::env::var_os("NO_PIPE").is_some() {
         // running from a terminal, do normal pacman things to get updates
         get_all_upgrades()?
     } else {
@@ -361,7 +367,7 @@ fn run() -> Result<()> {
     };
 
     writeln!(out)?;
-    writeln!(out, "Packages to upgrade:  {}", upgrades.len())?;
+    writeln!(out, "Packages to upgrade: {}", upgrades.len())?;
     writeln!(out, "Total download size:  {total_dl:8.2} MiB")?;
     writeln!(out, "Total installed size: {total_inst:8.2} MiB")?;
     writeln!(out, "Net upgrade size:     {net_upsize:8.2} MiB")?;
@@ -392,29 +398,10 @@ extra pacman logic besides associating package names with sync db names.
 fn main() {
     // we don't actually do any argument parsing (yet), instead clap is just used to implement help
     // and version flags and error out if any arguments are passed
-    let args = clap::command!()
+    let _ = clap::command!()
         .about(HELP_TEXT.lines().next().unwrap())
         .long_about(HELP_TEXT)
-        .arg(clap::Arg::new("desc").long("desc"))
-        .arg(clap::Arg::new("db").long("db"))
         .get_matches();
-
-    if let Some(path) = args.get_one::<String>("desc") {
-        let map = alpm::read_desc_file(path).unwrap();
-        dbg!(&map);
-
-        let desc = std::fs::read_to_string(path).unwrap();
-        let pkg = alpm::LocalPkg::from_desc(&desc).unwrap();
-        dbg!(&pkg);
-
-        return;
-    }
-
-    if let Some(path) = args.get_one::<String>("db") {
-        let map = alpm::SyncPkg::load_sync_dbs(path).unwrap();
-        println!("{map:#?}");
-        return;
-    }
 
     if let Err(err) = run() {
         if let Some(ioerr) = err.downcast_ref::<io::Error>() {
