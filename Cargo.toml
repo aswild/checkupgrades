@@ -16,6 +16,3 @@ regex = "1.6"
 rustix = { version = "0.38.30", features = ["process"] }
 tar = "0.4.40"
 zstd = "0.13.0"
-
-[profile.release]
-debug = true
