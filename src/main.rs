@@ -1,7 +1,8 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io::{self, IsTerminal, Read, Write};
+use std::fs;
+use std::io::{self, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -9,8 +10,10 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 
 use ahash::HashSet;
+use anstream::{AutoStream, ColorChoice};
 use anyhow::{anyhow, Context, Result};
 use bstr::ByteSlice;
+use clap::{Arg, ArgAction};
 use owo_colors::{AnsiColors, OwoColorize};
 
 mod alpm;
@@ -272,15 +275,19 @@ fn add_extra_info(upgrades: &mut [Upgrade]) -> Result<()> {
     Ok(())
 }
 
-fn run() -> Result<()> {
-    let mut upgrades = if io::stdin().is_terminal() || std::env::var_os("NO_PIPE").is_some() {
-        // running from a terminal, do normal pacman things to get updates
-        get_all_upgrades()?
-    } else {
-        // stdin is redirected, assume that we're piping in the output of /usr/bin/checkupdates
-        let mut buf = String::new();
-        io::stdin().read_to_string(&mut buf).context("failed to read stdin")?;
-        buf.lines().filter_map(|line| line.parse().ok()).collect()
+fn run(args: Args) -> Result<()> {
+    let mut upgrades = match args.input {
+        Input::None => get_all_upgrades()?,
+        Input::Stdin => io::read_to_string(io::stdin().lock())
+            .context("failed to read stdin")?
+            .lines()
+            .filter_map(|line| line.parse().ok())
+            .collect(),
+        Input::File(path) => fs::read_to_string(&path)
+            .with_context(|| format!("failed to read input file {}", path.display()))?
+            .lines()
+            .filter_map(|line| line.parse().ok())
+            .collect(),
     };
 
     if let Err(err) = add_extra_info(&mut upgrades) {
@@ -309,7 +316,7 @@ fn run() -> Result<()> {
 
     let oldver_width = upgrades.iter().map(|u| u.oldver.len()).max().unwrap_or(0);
 
-    let mut out = anstream::AutoStream::auto(io::stdout().lock());
+    let mut out = AutoStream::new(io::stdout().lock(), args.color_choice);
 
     for u in upgrades.iter() {
         match &u.repo {
@@ -357,32 +364,68 @@ fn run() -> Result<()> {
 static HELP_TEXT: &str = "\
 Check for available pacman package updates.
 
-checkupgrades lists available pacman package updates without needing to be
-and without actually touching the main pacman sync databases. The output is
-colorized formatted to look nice based on paru's layout.
+checkupgrades lists available pacman package updates without needing root and without touching the
+main pacman sync databases. The output is colorized formatted to look nice based on paru's layout.
 
-Usage:
-    checkupgrades [-h|--help]
-    /usr/bin/checkupdates | checkupgrades
+By default, checkupgrades implements the same logic as checkupdates (from the pacman-contrib
+package) to fetch a copy of the sync databases and list available updates for installed packages.
+You may instead use a file containing the same output format as `pacman -Qu` as the input, though
+this is mainly for testing.";
 
-By default, checkupgrades implements the same logic as checkupdates (from the
-pacman-contrib package) to fetch a copy of the sync databases and list available
-updates for installed packages.
+enum Input {
+    None,
+    Stdin,
+    File(PathBuf),
+}
 
-Alternatively, if stdin is piped, it's assumed to be the output of the
-checkupdates script from pacman-contrib, and checkupgrades will not invoke any
-extra pacman logic besides associating package names with sync db names.
-";
+struct Args {
+    color_choice: ColorChoice,
+    input: Input,
+}
+
+impl Args {
+    fn parse() -> Self {
+        let mut args = clap::command!()
+            .about(HELP_TEXT.lines().next().unwrap())
+            .long_about(HELP_TEXT)
+            .arg(
+                Arg::new("no-color")
+                    .long("no-color")
+                    .action(ArgAction::SetTrue)
+                    .help("Disable colored output"),
+            )
+            .arg(
+                Arg::new("upgrades-file")
+                    .required(false)
+                    .value_parser(clap::value_parser!(PathBuf))
+                    .value_name("FILE")
+                    .help(
+                        "Read list of upgrades from FILE (or stdin when FILE is '-') \
+                         instead of `pacman -Qu`",
+                    ),
+            )
+            .get_matches();
+
+        Self {
+            color_choice: if args.get_flag("no-color") || anstyle_query::no_color() {
+                ColorChoice::Never
+            } else {
+                ColorChoice::Always
+            },
+
+            input: args.remove_one::<PathBuf>("upgrades-file").map_or(Input::None, |path| {
+                if path.to_str() == Some("-") {
+                    Input::Stdin
+                } else {
+                    Input::File(path)
+                }
+            }),
+        }
+    }
+}
 
 fn main() {
-    // we don't actually do any argument parsing (yet), instead clap is just used to implement help
-    // and version flags and error out if any arguments are passed
-    let _ = clap::command!()
-        .about(HELP_TEXT.lines().next().unwrap())
-        .long_about(HELP_TEXT)
-        .get_matches();
-
-    if let Err(err) = run() {
+    if let Err(err) = run(Args::parse()) {
         if let Some(ioerr) = err.downcast_ref::<io::Error>() {
             if ioerr.kind() == io::ErrorKind::BrokenPipe {
                 return;
