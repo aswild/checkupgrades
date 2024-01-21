@@ -5,14 +5,15 @@ edition = "2021"
 
 [dependencies]
 ahash = "0.8.7"
+anstream = "0.6.11"
 anyhow = "1.0.70"
 bstr = "1"
 clap = { version = "4.1", features = ["cargo"] }
 flate2 = { version = "1.0.28", default-features = false, features = ["zlib-ng"] }
+owo-colors = "4.0.0"
 regex = "1.6"
 rustix = { version = "0.38.30", features = ["process"] }
 tar = "0.4.40"
-termcolor = "1"
 zstd = "0.13.0"
 
 [profile.release]

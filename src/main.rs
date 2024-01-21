@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use ahash::HashSet;
 use anyhow::{anyhow, Context, Result};
 use bstr::ByteSlice;
-use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
+use owo_colors::{AnsiColors, OwoColorize};
 
 mod alpm;
 
@@ -139,18 +139,15 @@ impl Repo {
         }
     }
 
-    fn color_spec(&self) -> ColorSpec {
-        let color = match self {
-            Self::Core => Color::Magenta,
-            Self::Extra => Color::Blue,
-            Self::Community => Color::Red,
-            Self::Multilib => Color::Green,
-            Self::Custom(_) => Color::Cyan,
-            Self::Unknown => Color::White,
-        };
-        let mut spec = ColorSpec::new();
-        spec.set_fg(Some(color));
-        spec
+    fn get_color(&self) -> AnsiColors {
+        match self {
+            Self::Core => AnsiColors::Magenta,
+            Self::Extra => AnsiColors::Blue,
+            Self::Community => AnsiColors::Red,
+            Self::Multilib => AnsiColors::Green,
+            Self::Custom(_) => AnsiColors::Cyan,
+            Self::Unknown => AnsiColors::White,
+        }
     }
 }
 
@@ -312,50 +309,32 @@ fn run() -> Result<()> {
 
     let oldver_width = upgrades.iter().map(|u| u.oldver.len()).max().unwrap_or(0);
 
-    let out = StandardStream::stdout(ColorChoice::Always);
-    let mut out = out.lock();
-    let red = ColorSpec::new().set_fg(Some(Color::Red)).clone();
-    let green = ColorSpec::new().set_fg(Some(Color::Green)).clone();
+    let mut out = anstream::AutoStream::auto(io::stdout().lock());
 
     for u in upgrades.iter() {
-        // [repo/]pkgname
         match &u.repo {
-            Some(repo) => {
-                out.set_color(&repo.color_spec())?;
-                write!(out, "{repo}")?;
-                out.reset()?;
-                write!(
-                    out,
-                    "/{pkgname}{space:width$}",
-                    pkgname = u.pkgname,
-                    space = "",
-                    width = repo_name_width - (u.pkgname.len() + repo.as_str().len() + 1),
-                )?;
-            }
+            Some(repo) => write!(
+                out,
+                "{repo}/{pkgname}{space:width$}",
+                repo = repo.color(repo.get_color()),
+                pkgname = u.pkgname,
+                space = "",
+                width = repo_name_width - (u.pkgname.len() + repo.as_str().len() + 1),
+            )?,
             None => write!(out, "{:repo_name_width$}", u.pkgname)?,
         }
 
-        // two spaces between pkgname and old version
-        write!(out, "  ")?;
-
-        // old version
         let clen = u.common_length();
-        write!(out, "{}", &u.oldver[..clen])?;
-        out.set_color(&red)?;
-        write!(out, "{}", &u.oldver[clen..])?;
-        out.reset()?;
-
-        // padding and arrow between old and new version
-        write!(out, "{space:width$} -> ", space = "", width = oldver_width - u.oldver.len())?;
-
-        // new version
-        write!(out, "{}", &u.newver[..clen])?;
-        out.set_color(&green)?;
-        write!(out, "{}", &u.newver[clen..])?;
-        out.reset()?;
-
-        // finally, end the line
-        writeln!(out)?;
+        writeln!(
+            out,
+            "  {ocommon}{ounique}{space:width$} -> {ncommon}{nunique}",
+            ocommon = &u.oldver[..clen],
+            ounique = (&u.oldver[clen..]).red(),
+            space = "",
+            width = oldver_width - u.oldver.len(),
+            ncommon = &u.newver[..clen],
+            nunique = (&u.newver[clen..]).green(),
+        )?;
     }
 
     let (total_dl, total_inst, net_upsize) = {
