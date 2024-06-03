@@ -1,12 +1,13 @@
 //! Utilities for working with the alpm/pacman database format
 
 use std::ffi::OsStr;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek};
 use std::path::Path;
 
 use ahash::HashMap;
 use anyhow::Context;
+use url::Url;
 
 use crate::{regex, Repo};
 
@@ -200,20 +201,31 @@ impl SyncPkg {
             .context("db path isn't utf-8")?
             .into();
 
+        let db_file = File::open(db_path).context("failed to open file")?;
+        SyncPkg::read_one_db_from(map, repo, db_file, filter)
+    }
+
+    /// Advanced version of `SyncPkg::read_one_db` that accepts any readable input. The name of the
+    /// repo must be provided with the `repo` argument.
+    pub fn read_one_db_from<R: Read + Seek>(
+        map: &mut HashMap<String, SyncPkg>,
+        repo: Repo,
+        mut db_reader: R,
+        filter: impl Fn(&str) -> bool,
+    ) -> anyhow::Result<()> {
         // read magic to determine compression type
-        let mut db_file = File::open(db_path).context("failed to open file")?;
         let mut magic = [0u8; 4];
-        db_file.read_exact(&mut magic).context("failed to read file header")?;
-        db_file.rewind().context("failed to rewind file")?;
+        db_reader.read_exact(&mut magic).context("failed to read file header")?;
+        db_reader.rewind().context("failed to rewind file")?;
 
         // Dynamic decompressor
         let input: Box<dyn Read> = if &magic[..] == b"\x28\xb5\x2f\xfd" {
-            Box::new(zstd::Decoder::new(db_file).context("failed to initialize zstd decoder")?)
+            Box::new(zstd::Decoder::new(db_reader).context("failed to initialize zstd decoder")?)
         } else if &magic[..2] == b"\x1f\x8b" {
-            Box::new(flate2::read::GzDecoder::new(db_file))
+            Box::new(flate2::read::GzDecoder::new(db_reader))
         } else {
             // no recognized compression magic, assume uncompressed
-            Box::new(BufReader::new(db_file))
+            Box::new(BufReader::new(db_reader))
         };
 
         let mut tarball = tar::Archive::new(input);
@@ -290,5 +302,66 @@ impl SyncPkg {
         }
 
         Ok(map)
+    }
+}
+
+/// Parsed data from `/etc/pacman.conf` (only the parts we need)
+#[derive(Debug, Clone)]
+pub struct PacmanConf {
+    pub repos: Vec<(Repo, Url)>,
+}
+
+impl PacmanConf {
+    pub fn load() -> anyhow::Result<Self> {
+        let arch = rustix::system::uname().machine().to_str().unwrap().to_string();
+        let serverline_re = regex!(r"(?m)^Server\s*=\s*(.*)$");
+        let mirrorlist = fs::read_to_string("/etc/pacman.d/mirrorlist")
+            .context("failed to read /etc/pacman.d/mirrorlist")?;
+        let mirror_template = serverline_re
+            .captures(&mirrorlist)
+            .map(|caps| caps.get(1).unwrap().as_str().replace("$arch", &arch));
+
+        let pacmanconf =
+            fs::read_to_string("/etc/pacman.conf").context("failed to read /etc/pacman.conf")?;
+        let section_re = regex!(r"^\[(\w+)\]$");
+        let mut repo_name = None;
+        let mut repos = Vec::new();
+
+        for line in pacmanconf.lines() {
+            if let Some(name) = section_re.captures(line).map(|c| c.get(1).unwrap().as_str()) {
+                if name != "options" {
+                    repo_name = Some(name);
+                }
+                continue;
+            }
+
+            if let Some(name) = repo_name {
+                let url = if regex!(r"^Include\s*=\s*/etc/pacman.d/mirrorlist\s*$").is_match(line) {
+                    mirror_template
+                        .as_deref()
+                        .map(|tmpl| tmpl.replace("$repo", name) + "/" + name + ".db")
+                        .ok_or_else(|| anyhow::anyhow!("no servers in mirrorlist"))?
+                } else if line.starts_with("Include") {
+                    anyhow::bail!(
+                        "pacman.conf line {line:?} Includes a file we don't want to read"
+                    );
+                } else if let Some(caps) = serverline_re.captures(line) {
+                    caps.get(1).unwrap().as_str().replace("$arch", &arch).replace("$repo", name)
+                        + "/"
+                        + name
+                        + ".db"
+                } else {
+                    continue;
+                };
+
+                let url = url
+                    .parse::<Url>()
+                    .with_context(|| format!("failed to parse {url} as a URL"))?;
+                repos.push((Repo::from(name), url));
+                repo_name = None;
+            }
+        }
+
+        Ok(Self { repos })
     }
 }

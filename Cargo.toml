@@ -9,10 +9,17 @@ anstream = "0.6.11"
 anstyle-query = "1.0.2"
 anyhow = "1.0.70"
 bstr = "1"
+chrono = "0.4.33"
 clap = { version = "4.4", features = ["cargo"] }
 flate2 = { version = "1.0.28", default-features = false, features = ["zlib-ng"] }
 owo-colors = "4.0.0"
 regex = "1.6"
-rustix = { version = "0.38.30", features = ["process"] }
+#reqwest = { version = "0.12.4", features = ["rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12.4", features = ["native-tls"] }
+rustix = { version = "0.38.30", features = ["process", "system"] }
+serif = "0.1.4"
 tar = "0.4.40"
-zstd = "0.13.0"
+tokio = { version = "1.36.0", features = ["fs", "io-util", "rt-multi-thread"] }
+tracing = "0.1.40"
+url = "2.5.0"
+zstd = { version = "0.13.0", features = ["pkg-config"] }

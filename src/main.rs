@@ -17,6 +17,7 @@ use clap::{Arg, ArgAction};
 use owo_colors::{AnsiColors, OwoColorize};
 
 mod alpm;
+mod sync;
 
 #[macro_export]
 macro_rules! regex {
@@ -404,7 +405,50 @@ impl Args {
                          instead of `pacman -Qu`",
                     ),
             )
+            .arg(
+                Arg::new("download")
+                    .long("download")
+                    .action(ArgAction::SetTrue)
+                    .help("DEBUG: download & parse repos"),
+            )
+            .arg(
+                Arg::new("sync")
+                    .long("sync")
+                    .value_name("PATH")
+                    .help("Sync databases locally to PATH"),
+            )
+            .arg(
+                Arg::new("repos")
+                    .long("repos")
+                    .action(ArgAction::SetTrue)
+                    .help("DEBUG: get repos from pacman.conf"),
+            )
             .get_matches();
+
+        if args.get_flag("download") {
+            /*
+            let dbs =
+                crate::sync::online_sync_dbs(|_pkgname| true).expect("failed to download DBs");
+            eprintln!("loaded {} packages", dbs.len());
+            std::process::exit(0);
+            */
+            unimplemented!();
+        } else if let Some(dir) = args.get_one::<String>("sync") {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(4)
+                .build()
+                .expect("failed to start tokio runtime")
+                .block_on(crate::sync::download_dbs(dir.as_ref()))
+                .expect("failed to download sync DBs");
+            std::process::exit(0);
+        } else if args.get_flag("repos") {
+            let conf = alpm::PacmanConf::load().unwrap();
+            for (repo, url) in conf.repos.iter() {
+                println!("[{repo}] {url}");
+            }
+            std::process::exit(0);
+        }
 
         Self {
             color_choice: if args.get_flag("no-color") || anstyle_query::no_color() {
@@ -425,6 +469,8 @@ impl Args {
 }
 
 fn main() {
+    serif::Config::new().init();
+
     if let Err(err) = run(Args::parse()) {
         if let Some(ioerr) = err.downcast_ref::<io::Error>() {
             if ioerr.kind() == io::ErrorKind::BrokenPipe {
