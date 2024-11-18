@@ -207,7 +207,7 @@ fn get_all_upgrades() -> Result<Vec<Upgrade>> {
     // immediately error out
     let mut sync_cmd = Command::new("fakeroot");
     sync_cmd
-        .args(["--", "pacman", "-Sy", "--dbpath"])
+        .args(["--", "pacman", "-Sy", "--disable-sandbox", "--dbpath"])
         .arg(checkupdates_db)
         .args(["--logfile", "/dev/null"]);
     let sync_output = sync_cmd.output().context("failed to execute (fakeroot) pacman -Sy")?;
