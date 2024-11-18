@@ -139,7 +139,7 @@ pub fn local_package_sizes(
 #[derive(Debug)]
 pub struct SyncPkg {
     pub name: String,
-    pub version: String,
+    //pub version: String,
     pub repo: Repo,
     pub download_size: u64,
     pub install_size: u64,
@@ -148,14 +148,14 @@ pub struct SyncPkg {
 impl SyncPkg {
     pub fn from_desc(desc: &str) -> anyhow::Result<Self> {
         let mut name = None;
-        let mut version = None;
+        //let mut version = None;
         let mut download_size = None;
         let mut install_size = None;
 
         for (tag, value) in DescIter::new(desc) {
             match tag {
                 "NAME" => name = Some(value.to_owned()),
-                "VERSION" => version = Some(value.to_owned()),
+                //"VERSION" => version = Some(value.to_owned()),
                 "CSIZE" => {
                     download_size = Some(value.parse().with_context(|| {
                         format!("failed to parse package csize {value:?} as an integer")
@@ -172,7 +172,7 @@ impl SyncPkg {
 
         Ok(SyncPkg {
             name: name.ok_or_else(|| anyhow::anyhow!("missing package name in desc"))?,
-            version: version.ok_or_else(|| anyhow::anyhow!("missing package version in desc"))?,
+            //version: version.ok_or_else(|| anyhow::anyhow!("missing package version in desc"))?,
             repo: Repo::Unknown,
             download_size: download_size
                 .ok_or_else(|| anyhow::anyhow!("missing package download size in desc"))?,
